@@ -1,0 +1,98 @@
+#!/usr/bin/env ruby
+
+require 'ap'
+require 'thor'
+require 'nokogiri'
+require 'qif'
+require 'date'
+require 'rest_client'
+
+class MyfinanceCitibank < Thor
+  desc "import -f [FILE]", "Imports [FILE] from Citibank to MyFinance"
+  method_option :xml_filename, :aliases => "-f", :desc => "Specify a filename of xml downloaded from Citibank"
+  def import
+    @xml_filename = options[:xml_filename]
+    convert
+    upload
+  end
+
+  private
+    def convert
+      puts "--> Convertendo o arquivo XML em QIF...".yellow
+      begin
+        create_qif
+        puts "    O arquivo #{qif_filename} foi criado com sucesso!".green
+      # rescue Exception => e
+      #   puts "    Houve um erro ao converter o arquivo :(".red
+      #   puts "    #{e.inspect}".red
+      #   exit
+      end
+    end
+
+    def upload
+      puts "--> Importando o arquivo para o MyFinance...".yellow
+      if myfinance_available?
+        RestClient.post "https://#{ENV['MYFINANCE_TOKEN']}:X@app.myfinance.com.br/entities/#{ENV['MYFINANCE_ENTITY']}/deposit_accounts/#{ENV['MYFINANCE_DEPOSIT_ACCOUNT']}/bank_statements", {'bank_statement[file]' => File.new(qif_filename, 'r'), :multipart => true}, {'ACCOUNT_ID' => ENV['MYFINANCE_ACCOUNT_ID']}
+        puts "    O arquivo #{qif_filename} foi enviado para o MyFinance com sucesso!".green
+      else
+        puts "    #{'ATENÇÃO!!!'.red} #{'As variáveis de ambiente com as informações do MyFinance não estão setadas.'.white}"
+        puts "    Para visualizar o seu token, acesse https://app.passaporteweb.com.br/profile/".white
+        puts "    Para configurar, utilize o comando abaixo, substituindo os valores de cada variável.".white
+        puts "    $ export MYFINANCE_ENTITY=99 MYFINANCE_DEPOSIT_ACCOUNT=99 MYFINANCE_ACCOUNT_ID=99 MYFINANCE_TOKEN=SEUTOKENAQUI".blue
+        puts "    A importação não foi realizada :(".red
+      end
+    rescue
+      puts "    Houve um erro ao enviar o arquivo para o MyFinance :(".red
+      exit
+    end
+
+    def create_qif
+      Qif::Writer.open(qif_filename, type = 'Bank', format = 'dd/mm/yyyy') do |qif|
+        doc.xpath('//table').first.xpath('row').each do |row|
+          date = row.xpath('data').first.content
+          memo = row.xpath('descricao').first.content.strip
+          if !['SALDO ANTERIOR', 'RECURSOS EM C/C', 'SALDO FINAL'].include?(memo)
+            transaction = {
+              date: date,
+              memo: memo,
+              number: row.xpath('referencia').first.content,
+              amount: row.xpath('valor').first.content.gsub(".","").gsub(",",".").to_f,
+            }
+            @first_transaction_date ||= date
+            @last_transaction_date = date
+            @count = @count+1 rescue @count = 1
+            qif << Qif::Transaction.new(transaction)
+          end
+        end
+        puts "    O arquivo contém #{@count} transações do dia #{@first_transaction_date} ao dia #{@last_transaction_date}.".white
+      end
+    end
+
+    def qif_filename
+      xml_filename.gsub(".xml", ".qif")
+    end
+
+    def xml_filename
+      @xml_filename
+    end
+
+    def myfinance_available?
+      ENV['MYFINANCE_TOKEN'] and ENV['MYFINANCE_ENTITY'] and ENV['MYFINANCE_DEPOSIT_ACCOUNT'] and ENV['MYFINANCE_ACCOUNT_ID']
+    end
+
+    def doc
+      @doc ||= Nokogiri::HTML(file_content)
+    end
+
+    def file_content
+      c = open(@xml_filename).read
+      c.gsub!('DESCRIÇÃO', 'DESCRICAO')
+      c.gsub!('REFERÊNCIA', 'REFERENCIA')
+      c.gsub!('VALOR_R.', 'VALOR')
+      c.gsub!('SALDO_R.', 'SALDO')
+      c
+    end
+
+end
+
+MyfinanceCitibank.start(ARGV)
